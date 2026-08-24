@@ -26,6 +26,7 @@ MIN_LIQUIDITY_USD = 50_000       # ignore anything under this - too easy to fake
 MIN_MARKET_CAP = 200_000
 MAX_MARKET_CAP = 50_000_000      # "low cap" ceiling, adjust to taste
 MIN_PRICE_CHANGE_24H = 50        # percent - must be UP at least this much in 24h, filters out dumps/fades
+
 WATCHLIST_FILE = "watchlist.json"
 SEEN_FILE = "seen.json"
 
@@ -64,53 +65,66 @@ def send_telegram(text):
 
 
 # ---------- Step 1: find recent runners on DEXScreener ----------
+# NOTE: DEXScreener's free API has no true "top gainers" endpoint. The
+# "boosted" endpoint is pay-to-appear, which misses real movers that
+# didn't pay for visibility. Instead, this pulls broad, active pair sets
+# via search (seeded on high-volume routers/DEXs per chain) and ranks
+# them locally by actual 24h price change + volume - a closer proxy to
+# genuine momentum than relying on paid placement alone.
+
+SEARCH_SEEDS = {
+    "solana": ["raydium", "pump", "orca"],
+    "ethereum": ["uniswap", "weth"],
+}
+
+
 def get_trending_pairs():
-    """
-    Pulls boosted/trending token profiles, then fetches their pair data
-    to check actual price change / liquidity / market cap.
-    """
-    candidates = []
-    try:
-        resp = requests.get(DEXSCREENER_BOOSTED, timeout=20)
-        resp.raise_for_status()
-        boosted = resp.json()
-    except Exception as e:
-        print(f"DEXScreener boosted fetch failed: {e}")
-        return candidates
+    candidates = {}  # keyed by token_address to dedupe across seed queries
 
-    for item in boosted:
-        chain = item.get("chainId")
-        addr = item.get("tokenAddress")
-        if chain not in ("ethereum", "solana") or not addr:
-            continue
-        try:
-            r = requests.get(f"{DEXSCREENER_SEARCH}?q={addr}", timeout=20)
-            r.raise_for_status()
-            pairs = r.json().get("pairs") or []
-        except Exception:
-            continue
+    for chain, seeds in SEARCH_SEEDS.items():
+        for seed in seeds:
+            try:
+                r = requests.get(DEXSCREENER_SEARCH, params={"q": seed}, timeout=20)
+                r.raise_for_status()
+                pairs = r.json().get("pairs") or []
+            except Exception as e:
+                print(f"DEXScreener search failed for '{seed}': {e}")
+                continue
 
-        for p in pairs:
-            liquidity = (p.get("liquidity") or {}).get("usd", 0) or 0
-            mcap = p.get("marketCap", 0) or p.get("fdv", 0) or 0
-            change_7d = (p.get("priceChange") or {}).get("h24", 0) or 0
-            # DEXScreener free API doesn't always expose 7d directly - h24 used as proxy signal
+            for p in pairs:
+                if p.get("chainId") != chain:
+                    continue
+                addr = (p.get("baseToken") or {}).get("address")
+                if not addr:
+                    continue
 
-        if (
-                liquidity >= MIN_LIQUIDITY_USD
-                and MIN_MARKET_CAP <= mcap <= MAX_MARKET_CAP
-                and change_7d >= MIN_PRICE_CHANGE_24H
-            ):
-                candidates.append({
-                    "chain": chain,
-                    "token_address": addr,
-                    "symbol": p.get("baseToken", {}).get("symbol", "?"),
-                    "liquidity": liquidity,
-                    "market_cap": mcap,
-                    "price_change_24h": change_7d,
-                    "url": p.get("url", ""),
-                })
-    return candidates
+                liquidity = (p.get("liquidity") or {}).get("usd", 0) or 0
+                mcap = p.get("marketCap", 0) or p.get("fdv", 0) or 0
+                change_24h = (p.get("priceChange") or {}).get("h24", 0) or 0
+                volume_24h = (p.get("volume") or {}).get("h24", 0) or 0
+
+                if (
+                    liquidity >= MIN_LIQUIDITY_USD
+                    and MIN_MARKET_CAP <= mcap <= MAX_MARKET_CAP
+                    and change_24h >= MIN_PRICE_CHANGE_24H
+                ):
+                    key = f"{chain}:{addr}"
+                    # keep the highest-volume pair if we see a token more than once
+                    if key not in candidates or volume_24h > candidates[key]["volume_24h"]:
+                        candidates[key] = {
+                            "chain": chain,
+                            "token_address": addr,
+                            "symbol": p.get("baseToken", {}).get("symbol", "?"),
+                            "liquidity": liquidity,
+                            "market_cap": mcap,
+                            "price_change_24h": change_24h,
+                            "volume_24h": volume_24h,
+                            "url": p.get("url", ""),
+                        }
+
+    # rank strongest movers first, cap how many we process per run
+    ranked = sorted(candidates.values(), key=lambda c: c["price_change_24h"], reverse=True)
+    return ranked[:25]
 
 
 # ---------- Step 2: safety check ----------
