@@ -207,37 +207,50 @@ def main():
     watchlist = load_json(WATCHLIST_FILE, {"solana_wallets": [], "last_tx": {}})
     seen = load_json(SEEN_FILE, {"tokens": []})
 
+    # --- Wallet buys: this is the actually-early signal, sent first and loud ---
+    wallet_alerts = check_watchlist_wallets(watchlist)
+    if wallet_alerts:
+        send_telegram(
+            "🐋 <b>Watchlist wallet activity</b>\n\n" + "\n\n".join(wallet_alerts[:10])
+        )
+
+    # --- DEXScreener discovery: these tokens have ALREADY moved by the time
+    # they show up here. Treat this as background research to grow the wallet
+    # watchlist, not as a buy signal. Sent quietly, once, as a digest - not as
+    # individual hype-framed alerts. ---
     candidates = get_trending_pairs()
-    new_alerts = []
+    new_finds = []
 
     for c in candidates:
         token_key = f"{c['chain']}:{c['token_address']}"
         if token_key in seen["tokens"]:
             continue
-
         if not is_safe(c["chain"], c["token_address"]):
             continue
 
         seen["tokens"].append(token_key)
-        new_alerts.append(
-            f"🚀 <b>{c['symbol']}</b> ({c['chain']})\n"
-            f"MCap: ${c['market_cap']:,.0f} | Liquidity: ${c['liquidity']:,.0f} | "
-            f"24h: {c['price_change_24h']}%\n{c['url']}"
-        )
+        new_finds.append(c)
 
-        # grow the Solana wallet watchlist from this runner's early holders
+        # grow the Solana wallet watchlist from this runner's early holders -
+        # this is the actual point of scanning these, not the alert itself
         if c["chain"] == "solana":
             holders = get_early_solana_holders(c["token_address"])
             for h in holders:
                 if h not in watchlist["solana_wallets"]:
                     watchlist["solana_wallets"].append(h)
 
-    # poll existing watchlist for fresh activity
-    new_alerts.extend(check_watchlist_wallets(watchlist))
-
-    if new_alerts:
-        send_telegram("\n\n".join(new_alerts[:10]))  # cap message size
-    else:
+    if new_finds:
+        lines = [
+            f"• <b>{c['symbol']}</b> ({c['chain']}) already +{c['price_change_24h']:.0f}% "
+            f"24h - MCap ${c['market_cap']:,.0f}, added holders to watchlist"
+            for c in new_finds
+        ]
+        send_telegram(
+            "🔍 <b>Background discovery (already moved - not a buy signal)</b>\n"
+            "These grow the wallet watchlist above. Watch for wallet alerts instead.\n\n"
+            + "\n".join(lines[:15])
+        )
+    elif not wallet_alerts:
         print("No new alerts this run.")
 
     save_json(WATCHLIST_FILE, watchlist)
