@@ -25,8 +25,7 @@ SOLSCAN_API_KEY = os.environ.get("SOLSCAN_API_KEY", "")  # optional but recommen
 MIN_LIQUIDITY_USD = 50_000       # ignore anything under this - too easy to fake
 MIN_MARKET_CAP = 200_000
 MAX_MARKET_CAP = 50_000_000      # "low cap" ceiling, adjust to taste
-MIN_PRICE_CHANGE_7D = 100        # percent - only care about genuine runners
-
+MIN_PRICE_CHANGE_24H = 50        # percent - must be UP at least this much in 24h, filters out dumps/fades
 WATCHLIST_FILE = "watchlist.json"
 SEEN_FILE = "seen.json"
 
@@ -97,9 +96,10 @@ def get_trending_pairs():
             change_7d = (p.get("priceChange") or {}).get("h24", 0) or 0
             # DEXScreener free API doesn't always expose 7d directly - h24 used as proxy signal
 
-            if (
+        if (
                 liquidity >= MIN_LIQUIDITY_USD
                 and MIN_MARKET_CAP <= mcap <= MAX_MARKET_CAP
+                and change_7d >= MIN_PRICE_CHANGE_24H
             ):
                 candidates.append({
                     "chain": chain,
