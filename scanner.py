@@ -65,64 +65,85 @@ def send_telegram(text):
 
 
 # ---------- Step 1: find recent runners on DEXScreener ----------
-# NOTE: DEXScreener's free API has no true "top gainers" endpoint. The
-# "boosted" endpoint is pay-to-appear, which misses real movers that
-# didn't pay for visibility. Instead, this pulls broad, active pair sets
-# via search (seeded on high-volume routers/DEXs per chain) and ranks
-# them locally by actual 24h price change + volume - a closer proxy to
-# genuine momentum than relying on paid placement alone.
+# NOTE: DEXScreener's free API has no true "top gainers" endpoint. Two
+# broader (non-keyword-search) sources are combined here instead:
+#  - token-boosts/latest: pay-to-appear, but broad and fast-moving
+#  - token-profiles/latest: newly-submitted token profiles, not payment-gated
+# Neither is a perfect "market-wide gainers" feed, but both surface a much
+# wider set of real candidates than searching by name/symbol did.
 
-SEARCH_SEEDS = {
-    "solana": ["raydium", "pump", "orca"],
-    "ethereum": ["uniswap", "weth"],
-}
+DEXSCREENER_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
+
+
+def _fetch_pair_data(chain, addr):
+    """Given a token address, fetch its actual pair data (price, liquidity, etc)."""
+    try:
+        r = requests.get(f"{DEXSCREENER_SEARCH}?q={addr}", timeout=20)
+        r.raise_for_status()
+        return r.json().get("pairs") or []
+    except Exception as e:
+        print(f"DEXScreener pair fetch failed for {addr}: {e}")
+        return []
 
 
 def get_trending_pairs():
-    candidates = {}  # keyed by token_address to dedupe across seed queries
+    seed_tokens = []  # list of (chain, address) to check
 
-    for chain, seeds in SEARCH_SEEDS.items():
-        for seed in seeds:
-            try:
-                r = requests.get(DEXSCREENER_SEARCH, params={"q": seed}, timeout=20)
-                r.raise_for_status()
-                pairs = r.json().get("pairs") or []
-            except Exception as e:
-                print(f"DEXScreener search failed for '{seed}': {e}")
+    # Source 1: boosted/paid listings
+    try:
+        r = requests.get(DEXSCREENER_BOOSTED, timeout=20)
+        r.raise_for_status()
+        for item in r.json():
+            if item.get("chainId") in ("ethereum", "solana") and item.get("tokenAddress"):
+                seed_tokens.append((item["chainId"], item["tokenAddress"]))
+    except Exception as e:
+        print(f"DEXScreener boosted fetch failed: {e}")
+
+    # Source 2: newly submitted profiles (not payment-gated)
+    try:
+        r = requests.get(DEXSCREENER_PROFILES, timeout=20)
+        r.raise_for_status()
+        for item in r.json():
+            if item.get("chainId") in ("ethereum", "solana") and item.get("tokenAddress"):
+                seed_tokens.append((item["chainId"], item["tokenAddress"]))
+    except Exception as e:
+        print(f"DEXScreener profiles fetch failed: {e}")
+
+    print(f"Seed tokens pulled from boosted+profiles: {len(seed_tokens)}")
+
+    candidates = {}
+    for chain, addr in seed_tokens:
+        for p in _fetch_pair_data(chain, addr):
+            if p.get("chainId") != chain:
+                continue
+            base_addr = (p.get("baseToken") or {}).get("address")
+            if not base_addr:
                 continue
 
-            for p in pairs:
-                if p.get("chainId") != chain:
-                    continue
-                addr = (p.get("baseToken") or {}).get("address")
-                if not addr:
-                    continue
+            liquidity = (p.get("liquidity") or {}).get("usd", 0) or 0
+            mcap = p.get("marketCap", 0) or p.get("fdv", 0) or 0
+            change_24h = (p.get("priceChange") or {}).get("h24", 0) or 0
+            volume_24h = (p.get("volume") or {}).get("h24", 0) or 0
 
-                liquidity = (p.get("liquidity") or {}).get("usd", 0) or 0
-                mcap = p.get("marketCap", 0) or p.get("fdv", 0) or 0
-                change_24h = (p.get("priceChange") or {}).get("h24", 0) or 0
-                volume_24h = (p.get("volume") or {}).get("h24", 0) or 0
+            key = f"{chain}:{base_addr}"
+            if (
+                liquidity >= MIN_LIQUIDITY_USD
+                and MIN_MARKET_CAP <= mcap <= MAX_MARKET_CAP
+                and change_24h >= MIN_PRICE_CHANGE_24H
+            ):
+                if key not in candidates or volume_24h > candidates[key]["volume_24h"]:
+                    candidates[key] = {
+                        "chain": chain,
+                        "token_address": base_addr,
+                        "symbol": p.get("baseToken", {}).get("symbol", "?"),
+                        "liquidity": liquidity,
+                        "market_cap": mcap,
+                        "price_change_24h": change_24h,
+                        "volume_24h": volume_24h,
+                        "url": p.get("url", ""),
+                    }
 
-                if (
-                    liquidity >= MIN_LIQUIDITY_USD
-                    and MIN_MARKET_CAP <= mcap <= MAX_MARKET_CAP
-                    and change_24h >= MIN_PRICE_CHANGE_24H
-                ):
-                    key = f"{chain}:{addr}"
-                    # keep the highest-volume pair if we see a token more than once
-                    if key not in candidates or volume_24h > candidates[key]["volume_24h"]:
-                        candidates[key] = {
-                            "chain": chain,
-                            "token_address": addr,
-                            "symbol": p.get("baseToken", {}).get("symbol", "?"),
-                            "liquidity": liquidity,
-                            "market_cap": mcap,
-                            "price_change_24h": change_24h,
-                            "volume_24h": volume_24h,
-                            "url": p.get("url", ""),
-                        }
-
-    # rank strongest movers first, cap how many we process per run
+    print(f"Candidates passing filters: {len(candidates)}")
     ranked = sorted(candidates.values(), key=lambda c: c["price_change_24h"], reverse=True)
     return ranked[:25]
 
