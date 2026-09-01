@@ -212,7 +212,10 @@ def check_watchlist_wallets(watchlist):
             if txs:
                 last_seen = watchlist.get("last_tx", {}).get(wallet)
                 tx_id = txs[0].get("txHash")
-                if tx_id and tx_id != last_seen:
+                if tx_id and last_seen is None:
+                    # first time polling this wallet - just record baseline, don't alert
+                    watchlist.setdefault("last_tx", {})[wallet] = tx_id
+                elif tx_id and tx_id != last_seen:
                     watchlist.setdefault("last_tx", {})[wallet] = tx_id
                     alerts.append(f"Watchlist wallet {wallet[:6]}... made a new move: "
                                    f"https://solscan.io/tx/{tx_id}")
@@ -227,6 +230,8 @@ def check_watchlist_wallets(watchlist):
 def main():
     watchlist = load_json(WATCHLIST_FILE, {"solana_wallets": [], "last_tx": {}})
     seen = load_json(SEEN_FILE, {"tokens": []})
+    print(f"Current wallet watchlist size: {len(watchlist.get('solana_wallets', []))}")
+    print(f"Solscan API key present: {bool(SOLSCAN_API_KEY)}")
 
     # --- Wallet buys: this is the actually-early signal, sent first and loud ---
     wallet_alerts = check_watchlist_wallets(watchlist)
@@ -256,6 +261,7 @@ def main():
         # this is the actual point of scanning these, not the alert itself
         if c["chain"] == "solana":
             holders = get_early_solana_holders(c["token_address"])
+            print(f"  {c['symbol']}: fetched {len(holders)} holders")
             for h in holders:
                 if h not in watchlist["solana_wallets"]:
                     watchlist["solana_wallets"].append(h)
