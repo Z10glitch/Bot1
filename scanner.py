@@ -27,6 +27,10 @@ MIN_MARKET_CAP = 200_000
 MAX_MARKET_CAP = 50_000_000      # "low cap" ceiling, adjust to taste
 MIN_PRICE_CHANGE_24H = 50        # percent - must be UP at least this much in 24h, filters out dumps/fades
 
+# Cluster signal: how many DIFFERENT watchlist wallets need to already hold a
+# brand-new token (before it's pumped) to count as a real early signal, vs noise.
+CLUSTER_MIN_OVERLAP = 2
+
 WATCHLIST_FILE = "watchlist.json"
 SEEN_FILE = "seen.json"
 
@@ -111,7 +115,7 @@ def get_trending_pairs():
 
     print(f"Seed tokens pulled from boosted+profiles: {len(seed_tokens)}")
 
-    candidates = {}
+    all_candidates = {}   # every token passing basic liquidity/mcap sanity checks
     for chain, addr in seed_tokens:
         for p in _fetch_pair_data(chain, addr):
             if p.get("chainId") != chain:
@@ -125,27 +129,29 @@ def get_trending_pairs():
             change_24h = (p.get("priceChange") or {}).get("h24", 0) or 0
             volume_24h = (p.get("volume") or {}).get("h24", 0) or 0
 
-            key = f"{chain}:{base_addr}"
-            if (
-                liquidity >= MIN_LIQUIDITY_USD
-                and MIN_MARKET_CAP <= mcap <= MAX_MARKET_CAP
-                and change_24h >= MIN_PRICE_CHANGE_24H
-            ):
-                if key not in candidates or volume_24h > candidates[key]["volume_24h"]:
-                    candidates[key] = {
-                        "chain": chain,
-                        "token_address": base_addr,
-                        "symbol": p.get("baseToken", {}).get("symbol", "?"),
-                        "liquidity": liquidity,
-                        "market_cap": mcap,
-                        "price_change_24h": change_24h,
-                        "volume_24h": volume_24h,
-                        "url": p.get("url", ""),
-                    }
+            if not (liquidity >= MIN_LIQUIDITY_USD and MIN_MARKET_CAP <= mcap <= MAX_MARKET_CAP):
+                continue
 
-    print(f"Candidates passing filters: {len(candidates)}")
-    ranked = sorted(candidates.values(), key=lambda c: c["price_change_24h"], reverse=True)
-    return ranked[:25]
+            key = f"{chain}:{base_addr}"
+            if key not in all_candidates or volume_24h > all_candidates[key]["volume_24h"]:
+                all_candidates[key] = {
+                    "chain": chain,
+                    "token_address": base_addr,
+                    "symbol": p.get("baseToken", {}).get("symbol", "?"),
+                    "liquidity": liquidity,
+                    "market_cap": mcap,
+                    "price_change_24h": change_24h,
+                    "volume_24h": volume_24h,
+                    "url": p.get("url", ""),
+                }
+
+    print(f"Candidates passing liquidity/mcap sanity checks: {len(all_candidates)}")
+
+    # subset that's already pumped - used for the low-priority background digest
+    pumped = [c for c in all_candidates.values() if c["price_change_24h"] >= MIN_PRICE_CHANGE_24H]
+    ranked_pumped = sorted(pumped, key=lambda c: c["price_change_24h"], reverse=True)
+
+    return list(all_candidates.values()), ranked_pumped[:25]
 
 
 # ---------- Step 2: safety check ----------
@@ -167,6 +173,38 @@ def is_safe(chain, token_address):
     except Exception as e:
         print(f"GoPlus check failed for {token_address}: {e}")
         return True  # fail open rather than silently dropping tokens
+
+
+# ---------- Step 2.5: cluster check - the REAL early signal ----------
+def get_all_holders(token_address, limit=30):
+    """Like get_early_solana_holders but returns more holders for overlap checking."""
+    return get_early_solana_holders(token_address, limit=limit)
+
+
+def check_cluster_signal(candidates, watchlist):
+    """
+    For each brand-new candidate (regardless of whether it's pumped yet),
+    check if 2+ wallets already on our watchlist are holding it. That overlap
+    - multiple independently-vetted wallets in the same new token before it
+    moves - is a much earlier and stronger signal than waiting for a pump.
+    """
+    watched_set = set(watchlist.get("solana_wallets", []))
+    if not watched_set:
+        return []
+
+    signals = []
+    for c in candidates:
+        if c["chain"] != "solana":
+            continue
+        holders = get_all_holders(c["token_address"])
+        overlap = watched_set.intersection(holders)
+        if len(overlap) >= CLUSTER_MIN_OVERLAP:
+            signals.append(
+                f"⚡ <b>{c['symbol']}</b> (solana) - {len(overlap)} watchlist wallets already in\n"
+                f"MCap ${c['market_cap']:,.0f} | Liquidity ${c['liquidity']:,.0f} | "
+                f"24h: {c['price_change_24h']:.0f}%\n{c['url']}"
+            )
+    return signals
 
 
 # ---------- Step 3: pull early holders (Solana only for now) ----------
@@ -233,7 +271,17 @@ def main():
     print(f"Current wallet watchlist size: {len(watchlist.get('solana_wallets', []))}")
     print(f"Solscan API key present: {bool(SOLSCAN_API_KEY)}")
 
-    # --- Wallet buys: this is the actually-early signal, sent first and loud ---
+    # --- Cluster signal: brand-new tokens where 2+ watchlist wallets are
+    # ALREADY in, before any pump. This is the earliest real signal we have. ---
+    all_candidates, pumped_candidates = get_trending_pairs()
+    cluster_signals = check_cluster_signal(all_candidates, watchlist)
+    if cluster_signals:
+        send_telegram(
+            "⚡ <b>Cluster signal - multiple watchlist wallets in early</b>\n\n"
+            + "\n\n".join(cluster_signals[:10])
+        )
+
+    # --- Wallet buys: also an early signal, sent next ---
     wallet_alerts = check_watchlist_wallets(watchlist)
     if wallet_alerts:
         send_telegram(
@@ -244,10 +292,9 @@ def main():
     # they show up here. Treat this as background research to grow the wallet
     # watchlist, not as a buy signal. Sent quietly, once, as a digest - not as
     # individual hype-framed alerts. ---
-    candidates = get_trending_pairs()
     new_finds = []
 
-    for c in candidates:
+    for c in pumped_candidates:
         token_key = f"{c['chain']}:{c['token_address']}"
         if token_key in seen["tokens"]:
             continue
@@ -277,7 +324,7 @@ def main():
             "These grow the wallet watchlist above. Watch for wallet alerts instead.\n\n"
             + "\n".join(lines[:15])
         )
-    elif not wallet_alerts:
+    elif not wallet_alerts and not cluster_signals:
         print("No new alerts this run.")
 
     save_json(WATCHLIST_FILE, watchlist)
