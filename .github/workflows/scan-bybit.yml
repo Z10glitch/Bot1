@@ -1,0 +1,49 @@
+name: Bybit A+ Scanner
+ 
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+  # keep the cron-job.org external trigger pattern from Bot1 — GitHub's own
+  # scheduler is unreliable and often runs late. Point cron-job.org at:
+  # POST https://api.github.com/repos/<you>/<repo>/dispatches
+  # body: {"event_type":"scan"}
+  repository_dispatch:
+    types: [scan]
+ 
+permissions:
+  contents: write
+ 
+concurrency:
+  group: bybit-scanner
+  cancel-in-progress: false
+ 
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+ 
+      - name: Install dependencies
+        run: pip install requests
+ 
+      - name: Run scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bybit_scanner.py
+ 
+      - name: Commit state
+        run: |
+          git config user.name "bybit-scanner-bot"
+          git config user.email "actions@github.com"
+          git add bot_state.json || true
+          git diff --cached --quiet || git commit -m "scanner state"
+          # rebase before push - concurrent runs can race on the state file
+          git pull --rebase --autostash || true
+          git push || true
