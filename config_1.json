@@ -1,0 +1,38 @@
+{
+  "_help": {
+    "min_turnover_usd": "Ignore any coin trading less than this in 24h. Higher = safer books, fewer stop-hunt wicks. 5000000 = wide net, 20000000 = sensible, 100000000 = majors only.",
+    "min_risk_reward": "Minimum reward-to-risk before a setup can fire. LOWER THIS FOR MORE ALERTS. 1.5 = chatty, 1.8 = default, 2.5 = very picky.",
+    "max_alerts_per_run": "Hard cap per 15-minute run. Stops a wild market flooding you.",
+    "cooldown_hours": "Won't re-alert the same coin within this many hours.",
+    "max_24h_move_pct": "Skip anything that's already moved more than this today - parabolic moves where you'd be the exit liquidity.",
+    "thin_book_warn_usd": "Alerts below this turnover get a 'thin book, size down' warning attached.",
+    "short_min_off_low_pct": "A short won't fire unless price has bounced at least this far off its recent low. Stops you shorting straight into support.",
+    "short_max_funding_cost_pct_day": "Won't suggest a short that bleeds more than this per day in funding.",
+    "enable_longs": "Set false to stop long alerts entirely.",
+    "enable_shorts": "Set false to stop short alerts entirely.",
+    "enable_regime_alerts": "Set false to stop the market risk-on/risk-off/flush pings.",
+    "quiet_hours": "No setup alerts during these hours in your local timezone. Regime FLUSH alerts still come through. Set 'enabled' false to be alerted around the clock.",
+    "timezone": "Your timezone, for quiet hours."
+  },
+
+  "min_turnover_usd": 5000000,
+  "min_risk_reward": 1.8,
+  "max_alerts_per_run": 3,
+  "cooldown_hours": 4,
+  "max_24h_move_pct": 40,
+  "thin_book_warn_usd": 20000000,
+
+  "short_min_off_low_pct": 1.5,
+  "short_max_funding_cost_pct_day": 0.20,
+
+  "enable_longs": true,
+  "enable_shorts": true,
+  "enable_regime_alerts": true,
+
+  "quiet_hours": {
+    "enabled": true,
+    "from": 23,
+    "to": 7
+  },
+  "timezone": "Australia/Sydney"
+}
